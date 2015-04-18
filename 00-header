@@ -1,1 +1,232 @@
-/etc/update-motd.d/00-header
+#!/usr/bin/env python
+from __future__ import division
+from collections import OrderedDict
+import os
+import subprocess
+import datetime
+
+activate_this='/home/ppkt/.virtualenv/motd/bin/activate_this.py'
+
+execfile(activate_this, dict(__file__=activate_this))
+
+import colorama
+import platform
+from colorama import Fore, Back, Style
+import netifaces as ni
+import uptime
+import psutil
+import getpass
+
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+logo ="""
+.___________.  ______   .______     _______.____    ____
+|           | /  __  \  |   _  \   /       |\   \  /   /
+`---|  |----`|  |  |  | |  |_)  | |   (----` \   \/   /
+    |  |     |  |  |  | |   ___/   \   \      \_    _/
+    |  |     |  `--'  | |  |   .----)   |       |  |
+    |__|      \______/  | _|   |_______/        |__|
+"""
+
+
+colorama.init()
+
+def get_uptime():
+    up = uptime.uptime()
+    parts = []
+    days, up = up // 86400, up % 86400
+    if days:
+        parts.append('%d day%s' % (days, 's' if days != 1 else ''))
+
+    hours, up = up // 3600, up % 3600
+    if hours:
+        parts.append('%d hour%s' % (hours, 's' if hours != 1 else ''))
+
+    minutes, up = up // 60, up % 60
+    if minutes:
+        parts.append('%d minute%s' % (minutes, 's' if minutes != 1 else ''))
+
+    if up or not parts:
+        parts.append('%.2f seconds' % up)
+
+    return '%s' % ', '.join(parts)
+
+def prepare_progressbar(values, width=40):
+    # sort thresholds
+
+    sorted_keys = OrderedDict()
+
+    for k in sorted(values.keys()):
+        sorted_keys[k * width] = values[k]
+
+    progressbar = ''
+    progressbar += '['
+    for i in range(width):
+        i += 1
+        for k, v in sorted_keys.iteritems():
+            if i < k:
+                progressbar += v
+                break
+        else:
+            progressbar += ' '
+
+    progressbar += "]"
+
+    return progressbar
+
+
+def get_mem_progressbar():
+    mem_total = psutil.virtual_memory().total // (1024 * 1024)
+    mem_active = psutil.virtual_memory().active // (1024 * 1024)
+    mem_buffers = psutil.virtual_memory().buffers // (1024 * 1024)
+    mem_used = psutil.virtual_memory().used // (1024 * 1024)
+
+    mem_active_percent = (mem_active / mem_total)
+    mem_buffers_percent = (mem_buffers / mem_total)
+    mem_used_percent = (mem_used / mem_total)
+
+    data_to_progessbar = {
+        mem_active_percent: '#',
+        mem_active_percent + mem_buffers_percent: '=',
+        mem_used_percent: '-'
+    }
+
+
+    progressbar = prepare_progressbar(data_to_progessbar)
+
+    progressbar += " {used:>6} MB / {total:>6} MB".format(used=mem_used, total=mem_total)
+    return progressbar
+
+def get_swap_progressbar():
+    swap_total = psutil.swap_memory().total // (1024 * 1024)
+    swap_used = psutil.swap_memory().used // (1024 * 1024)
+
+    data_to_progressbas = {
+        swap_used / swap_total: '#'
+    }
+
+    progressbar = prepare_progressbar(data_to_progressbas)
+    progressbar += " {used:>6} MB / {total:>6} MB".format(used=swap_used, total=swap_total)
+
+    return progressbar
+
+def get_active_users():
+    users = psutil.users()
+    usernames = set()
+    for user in users:
+        usernames.add(user.name)
+
+    return sorted(usernames)
+
+def get_processes():
+    procs = []
+    procs_status = {}
+    for p in psutil.process_iter():
+        try:
+            p.dict = p.as_dict(['username', 'get_nice', 'get_memory_info',
+                                'get_memory_percent', 'get_cpu_percent',
+                                'get_cpu_times', 'name', 'status'])
+            try:
+                procs_status[str(p.dict['status'])] += 1
+            except KeyError:
+                procs_status[str(p.dict['status'])] = 1
+        except psutil.NoSuchProcess:
+            pass
+        else:
+            procs.append(p)
+
+    return len(procs), procs_status
+
+def get_disk_usage():
+    partitions_to_ignore = ['/media/boot']
+    mount_points = [p.mountpoint for p in psutil.disk_partitions()]
+
+    mp_length = max([len(mp) for mp in mount_points])
+
+    for mount_point in mount_points:
+        mp_string = "{mount_point:<{width}}".format(mount_point=mount_point, width=mp_length)
+        du = psutil.disk_usage(mount_point)
+        disk_used = du.used // (1024 * 1024)
+        disk_total = du.total // (1024 * 1024)
+
+        data_to_progressbar = {disk_used / disk_total: '#'}
+
+        progressbar =  prepare_progressbar(data_to_progressbar)
+        progressbar += " {used:>6} MB / {total:>6} MB".format(used=disk_used, total=disk_total)
+
+        yield mp_string, progressbar
+
+
+def formatter(data, header=None, width=None):
+    key_len = 0
+    value_len = 0
+
+    if not width:
+        for k, v in data.iteritems():
+            key_len = max(key_len, len(k))
+            value_len = max(value_len, len(v))
+    else:
+        key_len = width
+
+    ret = ""
+    # print header
+    ret += "{0} {1} {0}\n".format("=" * key_len, header)
+
+    # print content
+    for k, v in data.iteritems():
+        ret += "{description:>{width}}: {value}\n".format(description=k, value=v, width=key_len)
+
+    return ret
+
+def print_system_data():
+    print logo
+
+    hostname = platform.node()
+    address = ni.ifaddresses('eth0')[ni.AF_INET][0]['addr']
+    kernel = ' '.join([platform.system(), platform.release(), platform.version(), platform.machine()])
+    u_time = get_uptime()
+    users = psutil.get_users()
+    cpu = "Amlogic ARM Cortex-A5 4x1.5 GHz"
+    username = getpass.getuser()
+    load = "{0:.2f}  {1:.2f}  {2:.2f} ".format(*os.getloadavg())
+    (process_count, process_status) = get_processes()
+
+    table = OrderedDict([
+        ["Hostname", hostname],
+        ["IP Address", address],
+        ["Kernel", kernel],
+        ["CPU", cpu]
+    ])
+
+    print formatter(table, header="Configuration", width=20)
+
+    table = OrderedDict([
+        ["Local date", datetime.datetime.now()],
+        ["Uptime", u_time],
+        ["Load average", load],
+        ["Active users", "{} ({})".format(len(users), ', '.join(get_active_users()))],
+        ["Processes", "{} ({})".format(process_count, ', '.join(["{}: {}".format(k,v) for k, v in process_status.iteritems()]))],
+        #["Username", username],
+    ])
+    print formatter(table, header="System Info", width=20)
+
+    table = OrderedDict([
+        ["Ram", get_mem_progressbar()],
+        ["Swap", get_swap_progressbar()]
+    ])
+    for description, value in get_disk_usage():
+        table[description] = value
+
+    print formatter(table, header="Resources usage", width=20)
+
+
+if __name__ == "__main__":
+    print_system_data()
